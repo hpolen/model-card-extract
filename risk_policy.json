@@ -1,0 +1,68 @@
+{
+  "weights": {
+    "license": 2,
+    "data_transparency": 2,
+    "security_provenance": 2,
+    "maturity_support": 1,
+    "compliance_alignment": 2,
+    "technical_feasibility": 1
+  },
+  "license": {
+    "allow": [
+      "apache-2.0",
+      "mit",
+      "bsd-3-clause",
+      "bsd-2-clause"
+    ],
+    "warn": [
+      "cc-by-4.0",
+      "lgpl-3.0",
+      "mpl-2.0",
+      "epl-2.0"
+    ],
+    "deny": [
+      "cc-by-nc-4.0",
+      "gpl-3.0",
+      "proprietary",
+      "unknown",
+      "no-license"
+    ]
+  },
+  "security_provenance": {
+    "trusted_owners": [
+      "meta-llama",
+      "mistralai",
+      "tiiuae",
+      "microsoft",
+      "google",
+      "huggingface"
+    ],
+    "min_stars": 100,
+    "min_downloads_30d": 1000
+  },
+  "data_transparency": {
+    "require_any_of": [
+      "datasets",
+      "training_data",
+      "data_license"
+    ]
+  },
+  "compliance_alignment": {
+    "keywords_ok": [
+      "hipaa",
+      "pci",
+      "gdpr",
+      "pii handling",
+      "privacy"
+    ],
+    "keywords_bad": [
+      "no restrictions",
+      "unrestricted",
+      "not for production"
+    ]
+  },
+  "technical_feasibility": {
+    "max_params_b": 70,
+    "warn_params_b": 20
+  }
+}
