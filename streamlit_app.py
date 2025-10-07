@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional
 import streamlit as st
 from huggingface_hub import ModelCard, model_info
 
-APP_VERSION = "1.4.0-STRIDE"
+APP_VERSION = "1.5.0-STRIDE+FOCUS"
 
 # ---------- Environment & Secrets ----------
 # Keep HF cache local so we don't depend on ~/.cache
@@ -32,14 +32,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or SECRETS.get("OPENAI_API_KEY", ""
 ADMIN_PIN = os.getenv("ADMIN_PIN") or SECRETS.get("ADMIN_PIN")
 
 # ---------- STRIDE System Prompt ----------
-# This prompt instructs GPT to produce a STRIDE-aligned threat model + a JSON register.
+# This prompt instructs GPT to produce a STRIDE-aligned threat model + a JSON register,
+# and to explicitly incorporate user-supplied "What Could Go Wrong?" concerns.
 STRIDE_SYSTEM_PROMPT = """
 You are a seasoned security architect. Perform **threat modeling using the STRIDE framework** for the system described by the user.
-Follow this structure and be concise, practical, and enterprise-ready.
+Be concise, practical, and enterprise-ready. Prioritize analysis of any user-supplied **"What Could Go Wrong?"** concerns:
+- Map each concern to the relevant STRIDE category (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege).
+- If a concern doesn’t clearly map, include it in an "Other Risks" section.
+- For threats derived from user concerns, mark `"source": "user"` in the JSON register.
 
 ### Output Contract (Markdown)
 0. **Executive Summary**
-   - Business goal, major risks, recommended disposition (Go / Go with controls / No-Go)
+   - Business goal, prioritized risks, recommended disposition (Go / Go with controls / No-Go)
 
 1. **Scope & Assets**
    - High-value assets and data classes (PII/PCI/PHI/etc.)
@@ -51,7 +55,10 @@ Follow this structure and be concise, practical, and enterprise-ready.
 3. **ASCII Data Flow Diagram (DFD)**
    - Simple text diagram with trust boundaries annotated
 
-4. **STRIDE Threats & Controls**
+4. **Mapped User Concerns**
+   - Bullet list mapping each provided concern to STRIDE categories (or "Other") with a one-line rationale
+
+5. **STRIDE Threats & Controls**
    For each STRIDE category (S, T, R, I, D, E), list relevant threats for this system.
    For every threat, include:
    - **Threat**: one-line name
@@ -64,16 +71,16 @@ Follow this structure and be concise, practical, and enterprise-ready.
    - **Detection/Monitoring**: signals, alerts, logs
    - **Residual Risk**: after mitigations
 
-5. **Compliance & Legal**
+6. **Compliance & Legal**
    - Note any applicable PCI/HIPAA/GDPR/etc. implications and gaps
 
-6. **Red-Team / Test Plan**
+7. **Red-Team / Test Plan**
    - Short list of probes or scenarios to validate mitigations
 
-7. **Operations & Monitoring**
+8. **Operations & Monitoring**
    - Runbooks, model/infra metrics, anomaly signals
 
-8. **Action Plan**
+9. **Action Plan**
    - A numbered, prioritized list of next steps with owners (generic) and time horizon
 
 ### JSON Threat Register (append at the end)
@@ -84,7 +91,7 @@ with this shape:
   "generated_at": "<ISO8601 UTC>",
   "stride": [
     {
-      "category": "S|T|R|I|D|E",
+      "category": "S|T|R|I|D|E|Other",
       "threat": "short name",
       "description": "string",
       "assets": ["..."],
@@ -94,11 +101,13 @@ with this shape:
       "risk_5x5": {"likelihood": 1-5, "impact": 1-5, "score": 1-25, "band": "Green|Yellow|Red"},
       "mitigations": ["..."],
       "detection": ["..."],
-      "residual_risk": "string"
+      "residual_risk": "string",
+      "source": "user|model"
     }
   ]
 }
-Make sure the JSON is valid and compact, and put it in a **fenced code block labeled `json`**.
+- Include `"source": "user"` for items derived from user concerns; otherwise `"model"`.
+- Ensure the JSON is **valid** and placed in a **fenced code block labeled `json`**.
 """
 
 # ---------- Page ----------
@@ -106,7 +115,7 @@ st.set_page_config(page_title="HF Model → Markdown + Risk + STRIDE Threat Mode
 st.title("🛡️ Model Due Diligence: HF Model → Markdown + Risk Score + STRIDE Threat Modeling")
 st.caption(
     f"App v{APP_VERSION}. Paste a Hugging Face URL or repo ID to generate a Markdown summary and risk score. "
-    "Optionally, create a STRIDE threat model using GPT."
+    "Optionally, create a STRIDE threat model using GPT. Include focused 'What Could Go Wrong?' concerns to steer the analysis."
 )
 
 # ---------- Helpers: Extract / Normalize ----------
@@ -460,7 +469,7 @@ with tab1:
                                        mime="text/markdown", use_container_width=True)
 
                     st.download_button("⬇️ Download Risk Score (JSON)",
-                                       data=json.dumps(score_json, indent=2).encode("utf-8"),
+                                       data=json.dumps(score_json, indent=2, default=str).encode("utf-8"),
                                        file_name=f"{safe_name}_risk.json",
                                        mime="application/json", use_container_width=True)
 
@@ -473,7 +482,7 @@ with tab1:
                     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as z:
                         z.writestr(fname_md, md)
                         z.writestr(f"{safe_name}_risk.md", score_md)
-                        z.writestr(f"{safe_name}_risk.json", json.dumps(score_json, indent=2))
+                        z.writestr(f"{safe_name}_risk.json", json.dumps(score_json, indent=2, default=str))
                         z.writestr("policy_version.txt", policy_version)
                         z.writestr("app_version.txt", APP_VERSION)
                     st.download_button("⬇️ Download Bundle (ZIP)",
@@ -500,6 +509,14 @@ with tab2:
     connectors = st.text_area("External Connectors / Tools (RAG, web, DBs, APIs, plugins)", height=80, disabled=disabled)
     compliance = st.text_input("Compliance overlays (PCI, GDPR, HIPAA, GLBA, SOX, etc.)", disabled=disabled)
     constraints = st.text_area("Operational Constraints (SLA, latency, cost caps, isolation needs)", height=60, disabled=disabled)
+
+    # 🚀 New: Human-in-the-loop focus areas
+    user_concerns = st.text_area(
+        "What Could Go Wrong? (focus areas to analyze)",
+        placeholder="e.g., Prompt injection; GPU resource exhaustion; Accidental PII in outputs",
+        height=80,
+        disabled=disabled
+    )
 
     colTM1, colTM2 = st.columns([1,1])
     with colTM1:
@@ -554,12 +571,21 @@ with tab2:
 
 ## Operational Constraints
 {(constraints or 'None').strip()}
+"""
 
+            # Include "What Could Go Wrong?" if provided
+            if user_concerns and user_concerns.strip():
+                user_prompt += f"\n## User Highlighted Concerns (What Could Go Wrong?)\n{user_concerns.strip()}\n"
+
+            # Output requirements reminder to the model
+            user_prompt += """
 ## Output Requirements
 - Use the STRIDE framework for threats.
+- Explicitly map the 'What Could Go Wrong?' concerns to STRIDE categories (or 'Other').
 - Include risk scoring with 5×5 matrix (likelihood 1–5 × impact 1–5) and band.
-- Append a fenced ```json threat_register``` block as described in the contract.
+- Append a fenced ```json threat_register``` block as described in the contract, tagging user-derived threats with "source": "user".
 """
+
             session["__tm_user_prompt__"] = user_prompt
             st.success("STRIDE prompt built.")
             with st.expander("Preview: User Prompt sent to GPT"):
