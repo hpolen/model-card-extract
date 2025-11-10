@@ -1,6 +1,7 @@
 # streamlit_app.py
 # HF Model Card → Markdown + Risk Score + Threat Modeling (STRIDE)
-# Python 3.9+ compatible
+# Requires user-supplied OpenAI API key via UI (no server key used)
+# Python 3.9+
 
 import os
 import re
@@ -15,25 +16,16 @@ from typing import Dict, Any, Optional
 import streamlit as st
 from huggingface_hub import ModelCard, model_info
 
-APP_VERSION = "1.5.0-STRIDE+FOCUS"
+APP_VERSION = "1.6.0-STRIDE+FOCUS-USERKEY"
 
-# ---------- Environment & Secrets ----------
+# ---------- Environment ----------
 # Keep HF cache local so we don't depend on ~/.cache
 os.environ.setdefault("HF_HOME", str(pathlib.Path(__file__).with_name("hf_cache")))
 
-def _safe_secrets() -> Dict[str, str]:
-    try:
-        return dict(st.secrets)
-    except Exception:
-        return {}
-
-SECRETS = _safe_secrets()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or SECRETS.get("OPENAI_API_KEY", "")
-ADMIN_PIN = os.getenv("ADMIN_PIN") or SECRETS.get("ADMIN_PIN")
+# DO NOT read OPENAI key from env/secrets; users must provide in UI.
+ADMIN_PIN = os.getenv("ADMIN_PIN") or (dict(st.secrets).get("ADMIN_PIN") if hasattr(st, "secrets") else None)
 
 # ---------- STRIDE System Prompt ----------
-# This prompt instructs GPT to produce a STRIDE-aligned threat model + a JSON register,
-# and to explicitly incorporate user-supplied "What Could Go Wrong?" concerns.
 STRIDE_SYSTEM_PROMPT = """
 You are a seasoned security architect. Perform **threat modeling using the STRIDE framework** for the system described by the user.
 Be concise, practical, and enterprise-ready. Prioritize analysis of any user-supplied **"What Could Go Wrong?"** concerns:
@@ -115,7 +107,7 @@ st.set_page_config(page_title="HF Model → Markdown + Risk + STRIDE Threat Mode
 st.title("🛡️ Model Due Diligence: HF Model → Markdown + Risk Score + STRIDE Threat Modeling")
 st.caption(
     f"App v{APP_VERSION}. Paste a Hugging Face URL or repo ID to generate a Markdown summary and risk score. "
-    "Optionally, create a STRIDE threat model using GPT. Include focused 'What Could Go Wrong?' concerns to steer the analysis."
+    "Optionally, create a STRIDE threat model using GPT. Users must provide their own OpenAI API key (client session only)."
 )
 
 # ---------- Helpers: Extract / Normalize ----------
@@ -325,11 +317,14 @@ def build_markdown_and_meta(repo_id: str) -> Dict[str, Any]:
     return {"markdown": md, "meta": meta}
 
 # ---------- OpenAI Helpers ----------
-def call_openai(system_prompt: str, user_prompt: str, model_name: str, temperature: float = 0.2, max_tokens: int = 2000) -> str:
+def call_openai(api_key: str, system_prompt: str, user_prompt: str, model_name: str,
+                temperature: float = 0.2, max_tokens: int = 2000) -> str:
+    if not api_key:
+        raise RuntimeError("No OpenAI API key provided.")
     # Try new SDK first
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
             model=model_name,
             messages=[
@@ -344,7 +339,7 @@ def call_openai(system_prompt: str, user_prompt: str, model_name: str, temperatu
         # Legacy SDK fallback
         try:
             import openai
-            openai.api_key = OPENAI_API_KEY
+            openai.api_key = api_key
             resp = openai.ChatCompletion.create(
                 model=model_name,
                 messages=[
@@ -359,11 +354,9 @@ def call_openai(system_prompt: str, user_prompt: str, model_name: str, temperatu
             raise RuntimeError(f"OpenAI call failed: {e2}")
 
 def try_extract_json_block(txt: str) -> Optional[str]:
-    # Prefer fenced ```json ... ``` blocks
     m = re.search(r"```json\s*(\{.*?\})\s*```", txt, re.S | re.I)
     if m:
         return m.group(1)
-    # Fallback: brace-balance the first JSON object
     start = txt.find("{")
     if start == -1:
         return None
@@ -381,20 +374,31 @@ def try_extract_json_block(txt: str) -> Optional[str]:
 def hash_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
 
-# ---------- UI ----------
+# ---------- UI (Sidebar) ----------
 with st.sidebar:
     st.header("Input")
     user_input = st.text_input("Hugging Face URL or repo ID", placeholder="e.g., meta-llama/Llama-3.1-8B")
 
     st.header("Threat Modeling (STRIDE) Settings")
-    if OPENAI_API_KEY:
-        st.success("OpenAI key detected")
+    # User-supplied OpenAI API key (session only)
+    st.text("Provide your own OpenAI API key:")
+    user_api_key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        placeholder="sk-...",
+        help="Your key is only kept in this session and is not stored by the app.",
+        key="__user_openai_key__",
+    )
+    if user_api_key:
+        st.success("API key provided for this session.")
     else:
-        st.info("Provide OPENAI_API_KEY in env or Streamlit secrets to enable Threat Modeling.")
+        st.info("Enter an OpenAI API key above to enable Threat Modeling.")
+
     tm_model = st.selectbox("OpenAI model", ["gpt-4o-mini", "gpt-4o", "gpt-4.1"], index=0)
     tm_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
     tm_max_tokens = st.slider("Max tokens", 512, 4000, 2000, 128)
 
+# ---------- Policy ----------
 policy_path = os.path.join(os.path.dirname(__file__), "risk_policy.json")
 policy = load_policy(policy_path)
 policy_version = policy.get("policy_version", "1.0.0")
@@ -495,10 +499,10 @@ with tab1:
 
 # ===== TAB 2: STRIDE =====
 with tab2:
-    if not OPENAI_API_KEY:
-        st.info("Provide `OPENAI_API_KEY` via environment or Streamlit secrets to enable STRIDE Threat Modeling.")
+    if not user_api_key:
+        st.info("Enter your OpenAI API key in the sidebar to enable STRIDE Threat Modeling.")
     else:
-        st.success("Threat Modeling enabled")
+        st.success("Threat Modeling enabled for this session.")
 
     disabled = not (user_input.strip())
     repo_id_preview = extract_repo_id(user_input.strip()) if user_input.strip() else ""
@@ -510,7 +514,6 @@ with tab2:
     compliance = st.text_input("Compliance overlays (PCI, GDPR, HIPAA, GLBA, SOX, etc.)", disabled=disabled)
     constraints = st.text_area("Operational Constraints (SLA, latency, cost caps, isolation needs)", height=60, disabled=disabled)
 
-    # 🚀 New: Human-in-the-loop focus areas
     user_concerns = st.text_area(
         "What Could Go Wrong? (focus areas to analyze)",
         placeholder="e.g., Prompt injection; GPU resource exhaustion; Accidental PII in outputs",
@@ -522,9 +525,10 @@ with tab2:
     with colTM1:
         build_tm = st.button("Build STRIDE Prompt (Preview)", disabled=disabled, use_container_width=True)
     with colTM2:
-        run_tm = st.button("Generate STRIDE Threat Model (GPT)", disabled=(disabled or not OPENAI_API_KEY), type="primary", use_container_width=True)
+        run_tm = st.button("Generate STRIDE Threat Model (GPT)",
+                           disabled=(disabled or not user_api_key),
+                           type="primary", use_container_width=True)
 
-    # Build prompt content from model facts
     session = st.session_state
 
     if build_tm and user_input.strip():
@@ -535,7 +539,6 @@ with tab2:
             session["__last_md__"] = built["markdown"]
             session["__last_meta__"] = meta
 
-            # Auto-filled user message sent under STRIDE system prompt
             owner = repo_id.split("/")[0] if "/" in repo_id else ""
             user_prompt = f"""# STRIDE Threat Modeling Input
 
@@ -573,11 +576,9 @@ with tab2:
 {(constraints or 'None').strip()}
 """
 
-            # Include "What Could Go Wrong?" if provided
             if user_concerns and user_concerns.strip():
                 user_prompt += f"\n## User Highlighted Concerns (What Could Go Wrong?)\n{user_concerns.strip()}\n"
 
-            # Output requirements reminder to the model
             user_prompt += """
 ## Output Requirements
 - Use the STRIDE framework for threats.
@@ -593,19 +594,18 @@ with tab2:
         except Exception as e:
             st.error(f"Could not build prompt: {e}")
 
-    if run_tm and OPENAI_API_KEY:
+    if run_tm and user_api_key:
         if "__tm_user_prompt__" not in session or "__last_meta__" not in session:
             st.warning("Click 'Build STRIDE Prompt (Preview)' first.")
         else:
             repo_id = extract_repo_id(user_input.strip())
-            meta = session["__last_meta__"]
             user_prompt = session["__tm_user_prompt__"]
             system_prompt = STRIDE_SYSTEM_PROMPT
             try:
                 with st.spinner("Calling GPT to generate your STRIDE threat model…"):
-                    tm_md = call_openai(system_prompt, user_prompt, model_name=tm_model, temperature=tm_temp, max_tokens=tm_max_tokens)
+                    tm_md = call_openai(user_api_key, system_prompt, user_prompt,
+                                        model_name=tm_model, temperature=tm_temp, max_tokens=tm_max_tokens)
 
-                # Try to extract the JSON threat register
                 tm_json_block = try_extract_json_block(tm_md)
                 tm_register_json = None
                 if tm_json_block:
@@ -614,7 +614,6 @@ with tab2:
                     except Exception:
                         tm_register_json = None
 
-                # Header stamp
                 header = (
                     f"# STRIDE Threat Model – {repo_id}\n\n"
                     f"- Generated at (UTC): {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
@@ -661,6 +660,7 @@ with tab2:
 
 # Footer
 st.caption(
-    "Tips: For private/gated Hugging Face repos, set an HF token via huggingface-cli login (locally) or secrets. "
-    "For STRIDE Threat Modeling, set OPENAI_API_KEY. Policy can be edited via risk_policy.json."
+    "For private/gated Hugging Face repos, use an HF token locally. "
+    "Threat Modeling requires you to provide your own OpenAI API key (stored only for this session). "
+    "Risk policy is editable via risk_policy.json."
 )
