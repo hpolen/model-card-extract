@@ -11,12 +11,77 @@ import time
 import hashlib
 import zipfile
 import pathlib
+import hmac
 from typing import Dict, Any, Optional
 
 import streamlit as st
 from huggingface_hub import ModelCard, model_info
 
 APP_VERSION = "1.6.0-STRIDE+FOCUS-USERKEY"
+
+# ---------- Access Gate (Password) ----------
+def require_password() -> None:
+    if st.session_state.get("authenticated", False):
+        return
+
+    # Load password from Streamlit Cloud Secrets (preferred) or env var fallback
+    try:
+        app_password = st.secrets["APP_PASSWORD"]
+    except Exception:
+        app_password = os.environ.get("APP_PASSWORD", "")
+
+    if not app_password:
+        st.error("APP_PASSWORD is not configured. Set it in Streamlit Secrets (or env var APP_PASSWORD).")
+        st.stop()
+
+    # Optional: hide sidebar/header while locked
+    st.markdown(
+        """
+        <style>
+          section[data-testid="stSidebar"] { display: none; }
+          header[data-testid="stHeader"] { visibility: hidden; }
+          footer { visibility: hidden; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Centered login card
+    left, mid, right = st.columns([1, 2, 1])
+    with mid:
+        st.markdown(
+            """
+            <div style="
+                background: rgba(255,255,255,0.92);
+                border-radius: 18px;
+                padding: 22px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+                ">
+              <div style="font-size:22px;font-weight:700;color:#0f172a;margin-bottom:6px;">
+                🔒 Access Required
+              </div>
+              <div style="font-size:13px;color:#334155;margin-bottom:14px;">
+                Enter the password to use this tool.
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.form("login_form", clear_on_submit=False):
+            pw = st.text_input("Password", type="password", key="pw", label_visibility="collapsed")
+            submitted = st.form_submit_button("Unlock")
+
+        if submitted:
+            if hmac.compare_digest(pw or "", str(app_password)):
+                st.session_state["authenticated"] = True
+                st.session_state.pop("pw", None)
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+
+    st.stop()
+
 
 # ---------- Environment ----------
 # Keep HF cache local so we don't depend on ~/.cache
@@ -104,6 +169,7 @@ with this shape:
 
 # ---------- Page ----------
 st.set_page_config(page_title="HF Model → Markdown + Risk + STRIDE Threat Model", page_icon="🛡️", layout="wide")
+require_password() 
 st.title("🛡️ Model Due Diligence: HF Model → Markdown + Risk Score + STRIDE Threat Modeling")
 st.caption(
     f"App v{APP_VERSION}. Paste a Hugging Face URL or repo ID to generate a Markdown summary and risk score. "
